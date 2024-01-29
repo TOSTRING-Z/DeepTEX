@@ -1,0 +1,14 @@
+# scRNA-seq-based PseudoBulk Generation and Domain Adaptation for T-cell Exhaustion Prediction
+
+## Overview
+
+In this project, we present a comprehensive approach to simulate bulk gene expression data from single-cell RNA sequencing (scRNA-seq) data, align the distributions of simulated and real bulk data using a domain adaptation model, and predict T-cell exhaustion levels in colorectal cancer (CRC) patients using a knowledge distillation model.
+
+### 1. PseudoBulk Data Generation
+We leverage scRNA-seq data to construct pseudo-bulk samples. This involves randomly sampling cells from multiple blocks, averaging the gene expression within each block, and assigning the most prevalent T-cell exhaustion state within a block as the label. The outcome is a pseudo-bulk dataset, with rows representing genes and each sample accompanied by a pseudo-label indicating the corresponding T-cell exhaustion stage (see Figure 1B).
+
+### 2. Domain Adaptation Model
+Despite the generation of pseudo-bulk data, significant distributional differences persist between simulated and real bulk data. To address this, we introduce a domain adaptation model. This model utilizes autoencoders (AE) to learn the distribution of real bulk data (see Figure 1C). Simultaneously, a regression encoder (CE) learns the distribution of pseudo-bulk data. The maximum mean discrepancy (MMD) loss is employed to narrow the distributional gap between the latent representations of the two datasets.
+
+### 3. Knowledge Distillation for T-cell Exhaustion Prediction
+Knowledge distillation, a technique proven effective in integrating diverse data modalities, is employed for predicting T-cell exhaustion levels. The trained domain adaptation model serves as the teacher model, while a new multi-layer neural network acts as the student model, employing boosting techniques. The teacher model extracts features from real bulk data through the AE model, and the extracted features are input into the CE model to generate soft labels indicating T-cell exhaustion levels (knowledge). Bulk data is then transformed into pathway activity matrices using GSVA and used as input for the student network (see Figure 1C). Notably, the student model's first layer is subject to L1 regularization to infer relevant pathway activities. Furthermore, the input feature matrix for the student model can be various transformed activity matrices, such as pathway activity matrices or HALLMRKE activity matrices. The model also supports the original gene expression matrix as input, utilizing all genes compared to the filtered bulk matrix used for the teacher network, enabling the identification of crucial genes related to T-cell exhaustion.
