@@ -24,7 +24,7 @@ clinical$status = if_else(clinical$status == 0,1,2)
 # Kaplan Meier survival analysis
 fit <- survfit(Surv(clinical$time,clinical$status) ~ clinical$group)
 
-pdf(file = paste0("output/bulk/model/Kaplan-Meier曲线-",name,".pdf"),onefile=F)
+pdf(file = paste0("output/bulk/model/Kaplan-Meier-",name,".pdf"),onefile=F)
 ggsurvplot(
   fit,
   data = clinical,

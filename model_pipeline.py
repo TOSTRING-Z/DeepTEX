@@ -14,6 +14,13 @@ from keras.optimizers import Adam
 from keras.losses import mean_squared_error,binary_crossentropy,categorical_crossentropy
 from keras.regularizers import L1
 import matplotlib.pyplot as plt
+from sklearn.metrics import precision_recall_curve,roc_curve,auc as cal_auc
+import time
+
+start_time = time.time()
+
+# val/train
+val = True
 
 def seed_tensorflow(seed=2023):
     random.seed(seed)
@@ -27,20 +34,18 @@ def softmax_with_t(t=1.0):
         return e_x / K.sum(e_x, axis=-1, keepdims=True)
     return _softmat
 
+os.chdir("/public3/home/sc72778/zgr/xmc")
 seed_tensorflow()
 # SC matrix
 data = pd.read_csv("data/data.csv",index_col=0)
 # Bulk matrix
 bulk = pd.read_csv("data/bulk.csv",index_col=0)
 # GSVA matrix
-gsva_hallmark = pd.read_csv("data/gsva-hallmark.csv",index_col=0).T
 gsva_kegg = pd.read_csv("data/gsva-kegg.csv",index_col=0).T
 
-hallmark_names = gsva_hallmark.columns
 kegg_names = gsva_kegg.columns
 gene_names = bulk.columns
 
-gsva_hallmark = gsva_hallmark.values
 gsva_kegg = gsva_kegg.values
 
 
@@ -61,37 +66,52 @@ bulk = np.nan_to_num(bulk,nan=0)
 sample_count = 100
 # Sampling times
 sample_time = 1000
-pseudo_features = []
-pseudo_labels = []
-# Use numpy.bincount to obtain the number of occurrences of each element
-counts = np.bincount(labels)
-ws = 1/counts
-w_vec = np.ones_like(labels).astype("float64")
-for i,w in enumerate(ws):
-    w_vec[labels==i] *= w
 
-w_vec = w_vec/w_vec.sum()
-# Imbalanced variable
-unbalanced_vars = []
-for i,w in enumerate(ws):
-    unbalanced_var = w_vec.copy()
-    unbalanced_var[labels==i] *= 2
-    unbalanced_var /= unbalanced_var.sum()
-    unbalanced_vars.append(unbalanced_var)
+def data_generation(t=1):
+    global pseudo_features,pseudo_labels
+    pseudo_features = []
+    pseudo_labels = []
+    # Use numpy.bincount to obtain the number of occurrences of each element
+    counts = np.bincount(labels)
+    ws = 1/counts
+    w_vec = np.ones_like(labels).astype("float64")
+    for i,w in enumerate(ws):
+        w_vec[labels==i] *= w
 
-for i_ in tqdm(range(sample_time)):
-    np.random.seed(i_)
-    p = unbalanced_vars[np.random.randint(0,len(unbalanced_vars))]
-    samples = np.random.choice(np.arange(len(labels)),sample_count,p=p,replace=False)
-    mean_feature = features[samples].sum(axis=0)
-    pseudo_features.append(mean_feature)
-    counts = np.bincount(labels[samples])
-    pseudo_label = np.argmax(counts)
-    pseudo_labels.append(pseudo_label)
+    w_vec = w_vec/w_vec.sum()
+    # Imbalanced variable
+    unbalanced_vars = []
+    for i,w in enumerate(ws):
+        unbalanced_var = w_vec.copy()
+        unbalanced_var[labels==i] *= 2
+        unbalanced_var /= unbalanced_var.sum()
+        unbalanced_vars.append(unbalanced_var)
 
-pseudo_features,pseudo_labels = np.array(pseudo_features),np.array(pseudo_labels)
+    # train: 0, val: sample_time * t
+    if val:
+        r_ = sample_time * t
+    else:
+        r_ = 0
 
-pseudo_labels = tf.one_hot(pseudo_labels, 6).numpy()
+    for i_ in tqdm(range(sample_time)):
+        np.random.seed(i_ + r_)
+        p = unbalanced_vars[np.random.randint(0,len(unbalanced_vars))]
+        samples = np.random.choice(np.arange(len(labels)),sample_count,p=p,replace=False)
+        mean_feature = features[samples].sum(axis=0)
+        pseudo_features.append(mean_feature)
+        counts = np.bincount(labels[samples])
+        pseudo_label = np.argmax(counts)
+        pseudo_labels.append(pseudo_label)
+
+    pseudo_features,pseudo_labels = np.array(pseudo_features),np.array(pseudo_labels)
+
+    pseudo_labels = tf.one_hot(pseudo_labels, 6).numpy()
+
+    # Both bulk and single cells undergo log2 conversion
+    pseudo_features = np.log2(pseudo_features + 1)
+    pseudo_features = minmax_scale(pseudo_features)
+
+data_generation(t=1)
 
 # Bulk sampling
 bulk_expands = []
@@ -107,10 +127,6 @@ for i in tqdm(range(sample_time)):
 bulk_expands = np.array(bulk_expands)
 
 bulk_expands = minmax_scale(bulk_expands)
-
-# Both bulk and single cells undergo log2 conversion
-pseudo_features = np.log2(pseudo_features + 1)
-pseudo_features = minmax_scale(pseudo_features)
 
 ##############################################################################################################################
 #............................................................................................................................#
@@ -219,51 +235,20 @@ AE_model = AE()
 CE_model = CE()
 AE_model_path = "output/bulk/model/AE_model_path.h5"
 CE_model_path = "output/bulk/model/CE_model_path.h5"
-if os.path.exists(AE_model_path):
-    AE_model.build((None,bulk_expands.shape[1]))
-    CE_model.build((None,pseudo_features.shape[1]))
-    AE_model.load_weights(AE_model_path)
-    CE_model.load_weights(CE_model_path)
-else:
-    pre_train_model = DomainAdaptation(AE_model,CE_model)
-    pre_train_model.compile(optimizer=Adam(learning_rate))
-    pre_train_model.fit(
-        [bulk_expands,pseudo_features],
-        pseudo_labels,
-        epochs=epochs,
-        batch_size=batch_size,
-        verbose=1
-    )
-    AE_model.save_weights(AE_model_path)
-    CE_model.save_weights(CE_model_path)
-
-    colors = ["r","g","b","k"]
-    for i,label in enumerate(pre_train_model.history.history):
-        loss = np.log2(pre_train_model.history.history[label])
-        plt.plot(pre_train_model.history.epoch, loss, colors[i], label=label)
-
-    plt.grid(True)
-    plt.ylabel('loss (log2)')
-    plt.legend(loc="upper right")
-    plt.savefig("output/bulk/model/loss.pdf")
-    plt.clf()
+AE_model.build((None,bulk_expands.shape[1]))
+CE_model.build((None,pseudo_features.shape[1]))
+AE_model.load_weights(AE_model_path)
+CE_model.load_weights(CE_model_path)
 
 ##############################################################################################################################
 #............................................................................................................................#
 ##############################################################################################################################
 # A Response Based Online Knowledge Distillation Model
-    
+
 encode = AE_model.predict(bulk).numpy()
 scores_base = CE_model.predict(encode).numpy()
 
 teacher_risk_scores = minmax_scale(scores_base[:,5])
-
-scores_TEX = pd.DataFrame(scores_base,index=bulk_samples)
-scores_TEX.to_csv("output/bulk/model/scores_TEX.csv")
-
-scores = pd.DataFrame(teacher_risk_scores,index=bulk_samples)
-scores.to_csv("output/bulk/model/risk_scores-teacher.csv")
-os.system("Rscript survival_analysis.R teacher")
 
 # Hyper-parameters
 learning_rate = 1e-3
@@ -271,60 +256,39 @@ epochs = 4000
 batch_size = 100
 
 indexs = np.arange(len(bulk))
-colors = ["r","g","b","k"]
 
-for (x,item_names,name) in ((bulk,gene_names,"gene"), (gsva_hallmark,hallmark_names,"hallmark"),(gsva_kegg, kegg_names, "kegg")):
-    scores_mean = []
-    weights_mean = []
-    for i in range(4):
-        seed_tensorflow(seed=i)
-        np.random.shuffle(indexs)
-        # Teacher model (pre-trained)
-        teacher_scores = teacher_risk_scores[indexs]
+scores_mean = []
+weights_mean = []
+for i in range(4):
+    seed_tensorflow(seed=i)
+    np.random.shuffle(indexs)
+    # Teacher model (pre-trained)
+    teacher_scores = teacher_risk_scores[indexs]
 
-        # Student model
-        input = Input(x.shape[1:])
-        o1 = Dense(128, kernel_regularizer=L1(1e-4), activation="relu")(input)
-        output = Dense(1, activation="sigmoid")(o1)
-        model = Model(input,output)
-        model.compile(optimizer=Adam(learning_rate), loss=binary_crossentropy, metrics=["mse"])
-        model.fit(
-            x=x[indexs],
-            y=teacher_scores,
-            epochs=epochs,
-            batch_size=batch_size,
-            verbose=1
-        )
-        loss = model.history.history["loss"]
-        plt.plot(model.history.epoch, loss, colors[i], label="loss")
+    # Student model
+    input = Input(gsva_kegg.shape[1:])
+    o1 = Dense(128, kernel_regularizer=L1(1e-4), activation="relu")(input)
+    output = Dense(1, activation="sigmoid")(o1)
+    model = Model(input,output)
+    model.compile(optimizer=Adam(learning_rate), loss=binary_crossentropy, metrics=["mse"])
+    model.fit(
+        x=gsva_kegg[indexs],
+        y=teacher_scores,
+        epochs=epochs,
+        batch_size=batch_size,
+        verbose=0
+    )
 
-        # Student model prediction
-        scores = model.predict(x)
-        scores_mean.append(scores)
+    # Student model prediction
+    scores = model.predict(gsva_kegg)
+    scores_mean.append(scores)
 
-        weights = model.layers[1].get_weights()[0]
-        weights = np.nan_to_num(weights, nan=0)
-        weights = np.sum(np.square(weights), 1)
-        weights_mean.append(weights)
-    
-    plt.grid(True)
-    plt.ylabel('loss')
-    plt.legend(loc="upper right")
-    plt.savefig(f"output/bulk/model/student-loss-{name}.pdf")
-    plt.clf()
+    weights = model.layers[1].get_weights()[0]
+    weights = np.nan_to_num(weights, nan=0)
+    weights = np.sum(np.square(weights), 1)
+    weights_mean.append(weights)
 
-    scores_mean = np.array(scores_mean)
-    weights_mean = np.array(weights_mean)
-    scores = scores_mean.mean(axis=0)
-    risk_scores = scores
+end_time = time.time()
 
-    item_weights = weights_mean.mean(axis=0)
-    item_ids = np.argsort(-item_weights)
-    items = item_names[item_ids]
-    item_weights = item_weights[item_ids]
-    
-    items = pd.DataFrame(np.array([items,item_weights]).T,columns=["items","item_weights"]).sort_values("item_weights",ascending=False)
-    items.to_csv(f"output/bulk/model/items-{name}.csv",index=False)
-    scores = pd.DataFrame(risk_scores,index=bulk_samples)
-    scores.to_csv(f"output/bulk/model/risk_scores-{name}.csv")
-    os.system(f"Rscript survival_analysis.R {name}")
+print("runtime:", end_time - start_time, "s")
+print("# # # # # # #")
